@@ -283,7 +283,7 @@ async def fetch_all_free_games(session: aiohttp.ClientSession) -> list:
 # 🤖  BOT DISCORD
 # ─────────────────────────────────────────────
 intents = discord.Intents.default()
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="?", intents=intents)
 
 
 def build_embed(game: dict) -> discord.Embed:
