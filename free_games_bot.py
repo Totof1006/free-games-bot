@@ -18,8 +18,9 @@ from datetime import datetime
 # ─────────────────────────────────────────────
 # ⚙️  CONFIGURATION — Modifie ces valeurs
 # ─────────────────────────────────────────────
-BOT_TOKEN  = "TON_TOKEN_ICI"         # Token du bot Discord
-CHANNEL_ID = 123456789012345678      # ID du salon Discord où poster les jeux
+import os
+BOT_TOKEN  = os.environ.get("BOT_TOKEN")           # Token du bot Discord
+CHANNEL_ID = int(os.environ.get("CHANNEL_ID"))     # ID du salon Discord où poster les jeux
 
 SENT_GAMES_FILE      = "sent_games.json"
 CHECK_INTERVAL_HOURS = 1
