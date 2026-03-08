@@ -282,7 +282,7 @@ async def fetch_all_free_games(session: aiohttp.ClientSession) -> list:
 # ─────────────────────────────────────────────
 # 🤖  BOT DISCORD
 # ─────────────────────────────────────────────
-intents = discord.Intents.default()
+intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="?", intents=intents)
 
 
