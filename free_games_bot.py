@@ -13,7 +13,7 @@ from datetime import datetime
 BOT_TOKEN  = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID") or 0)
 # Optionnel : ID du rôle à mentionner (ex: 123456789). Laisse à None sinon.
-ROLE_ID    = os.environ.get("ROLE_ID") 
+ROLE_ID = "1125174549860851794"
 
 SENT_GAMES_FILE      = "sent_games.json"
 CHECK_INTERVAL_HOURS = 1
