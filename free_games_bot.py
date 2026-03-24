@@ -3,7 +3,6 @@ from discord.ext import commands, tasks
 import aiohttp
 import json
 import os
-import re
 import asyncio
 from datetime import datetime
 
@@ -12,8 +11,8 @@ from datetime import datetime
 # ─────────────────────────────────────────────
 BOT_TOKEN  = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID") or 0)
-# Optionnel : ID du rôle à mentionner (ex: 123456789). Laisse à None sinon.
-ROLE_ID = "1125174549860851794"
+# Ton ID de rôle corrigé
+ROLE_ID    = "1125174549860851794" 
 
 SENT_GAMES_FILE      = "sent_games.json"
 CHECK_INTERVAL_HOURS = 1
@@ -51,19 +50,16 @@ def load_sent_games() -> set:
         try:
             with open(SENT_GAMES_FILE, "r") as f:
                 return set(json.load(f))
-        except (json.JSONDecodeError, IOError):
+        except:
             return set()
     return set()
 
 def save_sent_games(sent: set):
-    try:
-        with open(SENT_GAMES_FILE, "w") as f:
-            json.dump(list(sent), f)
-    except IOError as e:
-        print(f"❌ Erreur sauvegarde : {e}")
+    with open(SENT_GAMES_FILE, "w") as f:
+        json.dump(list(sent), f)
 
 # ─────────────────────────────────────────────
-# 🌐  FETCHERS (Optimisés)
+# 🌐  FETCHERS (Optimisés avec déduplication)
 # ─────────────────────────────────────────────
 
 async def fetch_epic_games(session: aiohttp.ClientSession) -> list:
@@ -86,7 +82,7 @@ async def fetch_epic_games(session: aiohttp.ClientSession) -> list:
                             "image": next((i["url"] for i in el.get("keyImages", []) if i["type"] == "OfferImageWide"), ""),
                             "end_date": offers[0]["promotionalOffers"][0]["endDate"][:10],
                         })
-    except Exception as e: print(f"[Epic] {e}")
+    except: pass
     return games
 
 async def fetch_gamerpower_games(session: aiohttp.ClientSession) -> list:
@@ -105,21 +101,19 @@ async def fetch_gamerpower_games(session: aiohttp.ClientSession) -> list:
                         "end_date": item.get("end_date", "N/A"),
                         "description": item.get("description"),
                     })
-    except Exception as e: print(f"[GamerPower] {e}")
+    except: pass
     return games
 
 async def fetch_all_free_games(session: aiohttp.ClientSession) -> list:
-    results = await asyncio.gather(
-        fetch_epic_games(session),
-        fetch_gamerpower_games(session),
-        return_exceptions=True
-    )
+    results = await asyncio.gather(fetch_epic_games(session), fetch_gamerpower_games(session), return_exceptions=True)
     flat_list = [item for sublist in results if isinstance(sublist, list) for item in sublist]
+    
+    # DÉDUPLICATION PAR TITRE
     seen, unique = set(), []
     for g in flat_list:
-        key = f"{g['platform']}_{g['title']}".lower().strip()
-        if key not in seen:
-            seen.add(key)
+        clean_title = g['title'].lower().strip()
+        if clean_title not in seen:
+            seen.add(clean_title)
             unique.append(g)
     return unique
 
@@ -132,32 +126,22 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 def build_embed(game: dict) -> discord.Embed:
     platform = game.get("platform", "Inconnu")
-    color    = PLATFORM_COLORS.get(platform, 0xFFFFFF)
-    emoji    = PLATFORM_EMOJIS.get(platform, "🎮")
-
     embed = discord.Embed(
-        title       = f"🎁 {game['title']}",
-        url         = game.get("url", ""),
-        description = game.get("description") or "Un jeu gratuit est disponible !",
-        color       = color,
-        timestamp   = datetime.utcnow(),
+        title=f"🎁 {game['title']}",
+        url=game.get("url"),
+        description=game.get("description") or "Nouveau jeu gratuit disponible !",
+        color=PLATFORM_COLORS.get(platform, 0xFFFFFF),
+        timestamp=datetime.utcnow()
     )
-    embed.set_author(name=f"{emoji} {platform}")
-    embed.add_field(name="⏳ Disponible jusqu'au", value=game.get("end_date", "N/A"),                inline=True)
-    embed.add_field(name="🔗 Récupérer le jeu",    value=f"[Cliquez ici]({game.get('url', '')})",   inline=True)
-
-    # --- PARTIE MODIFIÉE ---
-    if game.get("image"):
-        # On utilise set_image à la place de set_thumbnail pour un affichage en grand
-        embed.set_image(url=game["image"])
-    # ----------------------
-
-    embed.set_footer(text="Free Games Bot • 15 plateformes surveillées")
+    embed.set_author(name=f"{PLATFORM_EMOJIS.get(platform, '🎮')} {platform}")
+    embed.add_field(name="⏳ Jusqu'au", value=f"`{game.get('end_date', 'N/A')}`", inline=True)
+    if game.get("image"): embed.set_image(url=game["image"])
+    embed.set_footer(text="Free Games Bot • Service Automatique")
     return embed
 
 @bot.event
 async def on_ready():
-    print(f"✅ Connecté en tant que {bot.user}")
+    print(f"✅ Bot prêt : {bot.user}")
     if not check_free_games.is_running():
         check_free_games.start()
 
@@ -172,7 +156,8 @@ async def check_free_games():
 
     new_found = False
     for game in games:
-        key = f"{game['platform']}_{game['title']}".lower().replace(" ", "_")
+        # Clé unique pour éviter de renvoyer le même jeu plus tard
+        key = f"{game['title']}".lower().strip()
         if key not in sent_games:
             mention = f"<@&{ROLE_ID}> " if ROLE_ID else ""
             await channel.send(content=f"{mention}**Nouveau jeu gratuit détecté !**", embed=build_embed(game))
@@ -182,25 +167,6 @@ async def check_free_games():
 
     if new_found:
         save_sent_games(sent_games)
-
-@bot.command()
-async def freegames(ctx):
-    """Affiche les jeux gratuits du moment."""
-    async with ctx.typing():
-        async with aiohttp.ClientSession() as session:
-            games = await fetch_all_free_games(session)
-        if not games:
-            return await ctx.send("Rien pour le moment !")
-        for g in games[:5]: # Limite à 5 pour éviter le spam
-            await ctx.send(embed=build_embed(g))
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def check(ctx):
-    """Force la vérification."""
-    await ctx.send("🔄 Scan en cours...")
-    await check_free_games()
-    await ctx.send("✅ Scan terminé.")
 
 if __name__ == "__main__":
     bot.run(BOT_TOKEN)
