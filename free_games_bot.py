@@ -144,7 +144,7 @@ async def scan_loop():
         
         # Test d'envoi (tu peux remettre la logique de sent_games après test)
         try:
-            mention = f"<@&{ROLE_ID}> " if ROLE_ID else ""
+            mention = "@everyone " if ROLE_ID == "everyone" else (f"<@&{ROLE_ID}> " if ROLE_ID else "")
             await channel.send(content=f"{mention}**Nouveau jeu détecté !**", embed=embed)
         except: pass
         await asyncio.sleep(2)
