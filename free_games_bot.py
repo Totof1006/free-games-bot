@@ -133,22 +133,25 @@ async def scan_loop():
         all_results = await asyncio.gather(fetch_epic(session), fetch_steam(session), fetch_gamerpower(session))
         flat_list = [g for sub in all_results for g in sub if g]
 
-    for g in flat_list:
-        off_type, score = analyze_game(g)
-        if off_type == "Ignore": continue
-        
-        # On ne stocke/vérifie que les nouveaux jeux ici (logique simplifiée pour Railway)
-        embed = discord.Embed(title=f"🎁 {g['title']}", url=g["url"], color=PLATFORM_COLORS.get(g["platform"], 0x34495e))
-        embed.description = f"**Plateforme :** {g['platform']}\n**Type :** {off_type}\n**Score :** {'⭐' * score}"
-        if g.get("image"): embed.set_image(url=g["image"])
-        
-        # Test d'envoi (tu peux remettre la logique de sent_games après test)
-        try:
-            mention = "@everyone " if ROLE_ID == "everyone" else (f"<@&{ROLE_ID}> " if ROLE_ID else "")
-            await channel.send(content=f"{mention}**Nouveau jeu détecté !**", embed=embed)
-        except: pass
-        await asyncio.sleep(2)
+   for g in flat_list:
+    off_type, score = analyze_game(g)
+    if off_type == "Ignore": continue
+    
+    key = f"{g['title']}".lower().strip()
+    if key not in sent:
+        # GESTION PROPRE DE LA MENTION
+        if ROLE_ID.lower() == "everyone":
+            mention = "@everyone "
+        elif ROLE_ID.isdigit():
+            mention = f"<@&{ROLE_ID}> "
+        else:
+            mention = ""
 
+        embed = build_fusion_embed(g)
+        if embed:
+            await channel.send(content=f"{mention}**Nouveau jeu détecté !**", embed=embed)
+            sent.add(key)
+            await asyncio.sleep(2)
 @bot.event
 async def on_ready():
     print(f"✅ Bot prêt : {bot.user}")
