@@ -201,6 +201,21 @@ async def aide(ctx):
 async def help(ctx): await aide(ctx)
 
 @bot.command()
+async def plateformes(ctx):
+    # Récupère le texte d'en-tête selon la langue du salon
+    header = "🛰️ **Boutiques surveillées :**" if get_text(ctx.channel.id, "PLATFORM") == "🎮 **Plateforme**" else "🛰️ **Monitored Stores:**"
+    
+    # Crée la liste à partir des clés du dictionnaire PLATFORM_COLORS
+    liste = ", ".join(PLATFORM_COLORS.keys())
+    
+    await ctx.send(f"{header} {liste}")
+
+@bot.command()
+async def platforms(ctx):
+    """Alias en anglais pour la même commande"""
+    await plateformes(ctx)
+
+@bot.command()
 @commands.has_permissions(administrator=True)
 async def check(ctx):
     await ctx.send("🔎 Scan...")
