@@ -5,19 +5,39 @@ import asyncio
 import os
 import json
 from datetime import datetime
-from bs4 import BeautifulSoup
 
 # ─────────────────────────────────────────────
-# ⚙️ CONFIGURATION
+# ⚙️ CONFIGURATION & TRADUCTIONS
 # ─────────────────────────────────────────────
 BOT_TOKEN  = os.environ.get("BOT_TOKEN")
 raw_channel = os.environ.get("CHANNEL_ID")
 CHANNEL_ID = int(raw_channel) if raw_channel and raw_channel.isdigit() else 0
-# Correction : On récupère ROLE_ID depuis Railway ou on met "everyone" par défaut
 ROLE_ID    = os.environ.get("ROLE_ID", "everyone")
 
 SENT_GAMES_FILE = "sent_games.json"
+SETTINGS_FILE   = "settings.json"
 CHECK_INTERVAL  = 60 
+
+LOCALES = {
+    "fr": {
+        "NEW_GAME": "📢 **Nouveau jeu détecté !**",
+        "PLATFORM": "🎮 **Plateforme**",
+        "TYPE": "🏷️ **Type**",
+        "SCORE": "⭐ **Score**",
+        "FOOTER": "Tracking Temps Réel • L'escouade DO",
+        "HELP_TITLE": "🎮 Aide - Free Games Bot",
+        "LANG_CONFIRM": "✅ La langue de ce salon est : **Français**."
+    },
+    "en": {
+        "NEW_GAME": "📢 **New game detected!**",
+        "PLATFORM": "🎮 **Platform**",
+        "TYPE": "🏷️ **Type**",
+        "SCORE": "⭐ **Score**",
+        "FOOTER": "Real-time Tracking • L'escouade DO",
+        "HELP_TITLE": "🎮 Help - Free Games Bot",
+        "LANG_CONFIRM": "✅ Language for this channel is: **English**."
+    }
+}
 
 PLATFORM_COLORS = {
     "Epic Games": 0x2ECC71, "Steam": 0x1B2838, "GOG": 0xA12B2E,
@@ -26,60 +46,72 @@ PLATFORM_COLORS = {
 }
 
 # ─────────────────────────────────────────────
-# 🧠 LOGIQUE DE GESTION
+# 🧠 GESTION DES FICHIERS (CORRIGÉE)
 # ─────────────────────────────────────────────
 
 def load_sent():
     if os.path.exists(SENT_GAMES_FILE):
         try:
             with open(SENT_GAMES_FILE, "r") as f:
-                return set(json.load(f))
-        except:
-            return set()
+                data = json.load(f)
+                return set(data) if isinstance(data, list) else set()
+        except: return set()
     return set()
 
-def save_sent(sent):
+def save_sent(sent_set):
     with open(SENT_GAMES_FILE, "w") as f:
-        json.dump(list(sent), f)
+        json.dump(list(sent_set), f)
 
-def analyze_game(game):
+def load_settings():
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r") as f: return json.load(f)
+        except: return {}
+    return {}
+
+def save_settings(settings):
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(settings, f)
+
+# ─────────────────────────────────────────────
+# 🌍 LOGIQUE DE LANGUE
+# ─────────────────────────────────────────────
+
+def get_text(channel_id, key):
+    settings = load_settings()
+    lang = settings.get(str(channel_id), "both")
+    if lang == "fr": return LOCALES["fr"][key]
+    if lang == "en": return LOCALES["en"][key]
+    return f"{LOCALES['fr'][key]} / {LOCALES['en'][key]}"
+
+def build_embed(game, channel_id):
     title = str(game.get("title", "")).lower()
-    desc = str(game.get("description", "")).lower()
-    full_text = title + " " + desc
-    if any(x in full_text for x in ["demo", "beta", "playtest", "trial"]):
-        return "Ignore", 0
-    type_off = "⏳ Temporaire" if "weekend" in full_text else "🎁 Permanent"
+    if any(x in title for x in ["demo", "beta", "playtest", "trial"]): return None
+    
     score = 1
-    if game["platform"] in ["Epic Games", "GOG", "Nintendo eShop"]:
-        score += 1
-    if any(w in title for w in ["edition", "bundle", "complete"]):
-        score += 2
-    return type_off, min(score, 5)
-
-def build_fusion_embed(game):
-    off_type, score = analyze_game(game)
-    if off_type == "Ignore":
-        return None
+    if game["platform"] in ["Epic Games", "GOG", "Nintendo eShop"]: score += 1
+    if "edition" in title or "bundle" in title: score += 2
+    
     embed = discord.Embed(
         title=f"🎁 {game['title']}",
         url=game["url"],
-        description=f"**Plateforme :** {game['platform']}\n**Type :** {off_type}\n**Score :** {'⭐' * score}",
         color=PLATFORM_COLORS.get(game["platform"], 0x34495e),
         timestamp=datetime.utcnow()
     )
-    if game.get("image"):
-        embed.set_image(url=game["image"])
-    embed.set_footer(text="Tracking Temps Réel • L'escouade DO")
+    embed.add_field(name=get_text(channel_id, "PLATFORM"), value=game["platform"], inline=True)
+    embed.add_field(name=get_text(channel_id, "TYPE"), value="🎁 Permanent", inline=True)
+    embed.add_field(name=get_text(channel_id, "SCORE"), value='⭐' * min(score, 5), inline=True)
+    embed.set_footer(text=get_text(channel_id, "FOOTER"))
+    if game.get("image"): embed.set_image(url=game["image"])
     return embed
 
 # ─────────────────────────────────────────────
-# 🌐 SOURCES (FETCHERS)
+# 🌐 FETCHERS
 # ─────────────────────────────────────────────
 
-async def fetch_all_sources(session):
-    all_games = []
-    
-    # EPIC GAMES
+async def fetch_games(session):
+    games = []
+    # Epic Games
     try:
         async with session.get("https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions?locale=fr", timeout=10) as r:
             data = await r.json()
@@ -88,32 +120,22 @@ async def fetch_all_sources(session):
                 promos = el.get("promotions", {}).get("promotionalOffers", [])
                 if promos and any(o["discountSetting"]["discountPercentage"] == 0 for o in promos[0]["promotionalOffers"]):
                     slug = el.get("productSlug") or el.get("urlSlug")
-                    all_games.append({
-                        "platform": "Epic Games",
-                        "title": el["title"],
+                    games.append({
+                        "platform": "Epic Games", "title": el["title"],
                         "url": f"https://store.epicgames.com/fr/p/{slug}" if slug else "https://store.epicgames.com/fr/free-games",
-                        "image": next((i["url"] for i in el.get("keyImages", []) if i["type"] in ["OfferImageWide", "Thumbnail"]), None),
-                        "description": ""
+                        "image": next((i["url"] for i in el.get("keyImages", []) if i["type"] in ["OfferImageWide", "Thumbnail"]), None)
                     })
     except: pass
-
-    # GAMERPOWER (Steam, GOG, Switch, etc.)
+    # GamerPower
     try:
         async with session.get("https://www.gamerpower.com/api/giveaways?type=game", timeout=10) as r:
             data = await r.json()
             for item in data:
-                plat_raw = item.get("platforms", "").lower()
-                platform = "Nintendo eShop" if "switch" in plat_raw or "nintendo" in plat_raw else item.get("platforms", "Autre").split(",")[0].strip()
-                all_games.append({
-                    "platform": platform,
-                    "title": item.get("title"),
-                    "url": item.get("open_giveaway_url"),
-                    "image": item.get("image"),
-                    "description": item.get("description", "")
-                })
+                plat = item.get("platforms", "").lower()
+                matched = "Nintendo eShop" if "switch" in plat or "nintendo" in plat else item.get("platforms", "Autre").split(",")[0].strip()
+                games.append({"platform": matched, "title": item.get("title"), "url": item.get("open_giveaway_url"), "image": item.get("image")})
     except: pass
-    
-    return all_games
+    return games
 
 # ─────────────────────────────────────────────
 # 🤖 BOT COMMANDS
@@ -124,91 +146,71 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 async def run_scan(target_channel=None):
-    """Fonction centrale de scan utilisée par la boucle et la commande !check"""
     channel = target_channel or bot.get_channel(CHANNEL_ID)
     if not channel: return
     
     sent = load_sent()
     async with aiohttp.ClientSession() as session:
-        flat_list = await fetch_all_sources(session)
+        all_found = await fetch_games(session)
     
     new_found = False
-    for g in flat_list:
-        key = f"{g['title']}".lower().strip()
+    for g in all_found:
+        key = g['title'].lower().strip()
         if key not in sent:
-            embed = build_fusion_embed(g)
+            embed = build_embed(g, channel.id)
             if embed:
-                # GESTION PROPRE DU @@EVERYONE
-                if str(ROLE_ID).lower() == "everyone":
-                    mention = "@everyone "
-                else:
-                    mention = f"<@&{ROLE_ID}> " if str(ROLE_ID).isdigit() else ""
-                
-                await channel.send(content=f"{mention}**Nouveau jeu détecté !**", embed=embed)
+                mention = "@everyone " if str(ROLE_ID).lower() == "everyone" else (f"<@&{ROLE_ID}> " if str(ROLE_ID).isdigit() else "")
+                await channel.send(content=f"{mention}{get_text(channel.id, 'NEW_GAME')}", embed=embed)
                 sent.add(key)
                 new_found = True
                 await asyncio.sleep(1)
-    if new_found:
-        save_sent(sent)
+    if new_found: save_sent(sent)
 
 @tasks.loop(minutes=CHECK_INTERVAL)
-async def scan_loop():
-    await run_scan()
+async def scan_loop(): await run_scan()
 
 @bot.event
 async def on_ready():
-    print(f"✅ Bot opérationnel : {bot.user}")
-    if not scan_loop.is_running():
-        scan_loop.start()
+    print(f"✅ Logged in as {bot.user}")
+    if not scan_loop.is_running(): scan_loop.start()
 
-# --- LES COMMANDES ---
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def lang(ctx, choice: str = None):
+    choice = choice.lower() if choice else ""
+    if choice not in ["fr", "en", "both"]:
+        return await ctx.send("❌ Usage: `!lang fr` | `!lang en` | `!lang both`")
+    
+    settings = load_settings()
+    settings[str(ctx.channel.id)] = choice
+    save_settings(settings)
+    
+    confirm = "Mode bilingue activé !" if choice == "both" else LOCALES[choice]["LANG_CONFIRM"]
+    await ctx.send(confirm)
 
 @bot.command()
 async def aide(ctx):
-    embed = discord.Embed(title="🎮 Menu d'Aide - Free Games Bot", color=0x3498DB)
-    embed.add_field(name="!aide / !help", value="Affiche ce menu.", inline=False)
-    embed.add_field(name="!freegames", value="Affiche les jeux gratuits en cours.", inline=False)
-    embed.add_field(name="!plateformes", value="Liste les boutiques surveillées.", inline=False)
-    embed.add_field(name="!check", value="Force un scan (Admin uniquement).", inline=False)
-    embed.add_field(name="!reset", value="Efface l'historique (Admin uniquement).", inline=False)
-    embed.set_footer(text="Tracking en temps réel activé.")
+    embed = discord.Embed(title=get_text(ctx.channel.id, "HELP_TITLE"), color=0x3498DB)
+    embed.add_field(name="!aide / !help", value="Menu d'aide / Help menu", inline=False)
+    embed.add_field(name="!lang [fr/en/both]", value="*(Admin)* Change la langue / Change language", inline=False)
+    embed.add_field(name="!check", value="*(Admin)* Scan manuel / Manual scan", inline=False)
+    embed.add_field(name="!reset", value="*(Admin)* Reset l'historique / Clear history", inline=False)
     await ctx.send(embed=embed)
 
 @bot.command()
-async def help(ctx):
-    await aide(ctx)
-
-@bot.command()
-async def plateformes(ctx):
-    liste = "\n".join([f"• {p}" for p in PLATFORM_COLORS.keys()])
-    await ctx.send(f"🛰️ **Plateformes surveillées :**\n{liste}")
-
-@bot.command()
-async def freegames(ctx):
-    async with ctx.typing():
-        async with aiohttp.ClientSession() as session:
-            games = await fetch_all_sources(session)
-            if not games: 
-                return await ctx.send("Désolé, aucun jeu gratuit trouvé actuellement.")
-            # On envoie les 3 premiers jeux trouvés pour ne pas spammer
-            for g in games[:3]:
-                embed = build_fusion_embed(g)
-                if embed: await ctx.send(embed=embed)
+async def help(ctx): await aide(ctx)
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def check(ctx):
-    await ctx.send("🔎 **Scan manuel lancé...**")
+    await ctx.send("🔎 Scan...")
     await run_scan(ctx.channel)
-    await ctx.send("✅ **Scan terminé.**")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def reset(ctx):
     if os.path.exists(SENT_GAMES_FILE):
         os.remove(SENT_GAMES_FILE)
-        await ctx.send("✅ **Historique effacé.** Le prochain scan republiera tout.")
-    else:
-        await ctx.send("❌ Aucun historique trouvé.")
+        await ctx.send("✅ History cleared.")
 
 bot.run(BOT_TOKEN)
