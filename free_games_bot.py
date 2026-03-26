@@ -1,230 +1,317 @@
 import discord
 from discord.ext import commands, tasks
 import aiohttp
-import json
-import os
 import asyncio
+import os
+import json
+import time
 from datetime import datetime
+from bs4 import BeautifulSoup
 
-# ─────────────────────────────────────────────
-# ⚙️  CONFIGURATION
-# ─────────────────────────────────────────────
-BOT_TOKEN  = os.environ.get("BOT_TOKEN")
-CHANNEL_ID = int(os.environ.get("CHANNEL_ID") or 0)
-# Ton ID de rôle pour les notifications
-ROLE_ID    = "1125174549860851794" 
+# ─────────────────────────────
+# CONFIG
+# ─────────────────────────────
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-SENT_GAMES_FILE      = "sent_games.json"
-CHECK_INTERVAL_HOURS = 1
+if not BOT_TOKEN or not CHANNEL_ID:
+    raise ValueError("BOT_TOKEN ou CHANNEL_ID manquant")
 
-PLATFORM_COLORS = {
-    "Epic Games": 0x2ECC71, "Xbox Game Pass": 0x107C10, "PlayStation Plus": 0x003791,
-    "Steam": 0x1B2838, "Blizzard": 0x148EFF, "EA Play": 0xFF4747,
-    "Prime Gaming": 0xFF9900, "GOG": 0xA12B2E, "Ubisoft Connect": 0x0070D1,
-    "Humble Bundle": 0xCC3300, "itch.io": 0xFA5C5C, "Fanatical": 0xE84B3A,
-    "Rockstar Games": 0xFCB813, "Microsoft Store": 0x00A4EF, "Indiegala": 0x2C3E50,
+CHANNEL_ID = int(CHANNEL_ID)
+
+ROLE_MAP = {
+    "Epic Games": 123456789012345678,
+    "Steam": 123456789012345678,
+    "GOG": 123456789012345678
 }
 
-PLATFORM_EMOJIS = {
-    "Epic Games": "🟢", "Xbox Game Pass": "🟩", "PlayStation Plus": "🔵",
-    "Steam": "🖥️", "Blizzard": "💙", "EA Play": "🔴", "Prime Gaming": "🟠",
-    "GOG": "🟤", "Ubisoft Connect": "🔷", "Humble Bundle": "📦",
-    "itch.io": "🎀", "Fanatical": "🔥", "Rockstar Games": "⭐",
-    "Microsoft Store": "🪟", "Indiegala": "🎲",
-}
+CHECK_INTERVAL = 60  # minutes
+SENT_FILE = "sent_games.json"
 
-GAMERPOWER_PLATFORM_MAP = {
-    "steam": "Steam", "epic-games-store": "Epic Games", "xbox-game-pass": "Xbox Game Pass",
-    "ps4": "PlayStation Plus", "ps5": "PlayStation Plus", "battle.net": "Blizzard",
-    "ea-games": "EA Play", "prime-gaming": "Prime Gaming", "gog": "GOG",
-    "ubisoft": "Ubisoft Connect", "itch": "itch.io", "humble": "Humble Bundle",
-    "fanatical": "Fanatical", "rockstar": "Rockstar Games", "microsoft-store": "Microsoft Store",
-    "indiegala": "Indiegala",
-}
+# ─────────────────────────────
+# DISCORD INTENTS
+# ─────────────────────────────
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ─────────────────────────────────────────────
-# 📦  GESTION DE L'HISTORIQUE
-# ─────────────────────────────────────────────
-def load_sent_games() -> set:
-    if os.path.exists(SENT_GAMES_FILE):
+# ─────────────────────────────
+# STORAGE
+# ─────────────────────────────
+def load_sent():
+    if os.path.exists(SENT_FILE):
         try:
-            with open(SENT_GAMES_FILE, "r") as f:
+            with open(SENT_FILE, "r") as f:
                 return set(json.load(f))
         except:
             return set()
     return set()
 
-def save_sent_games(sent: set):
-    with open(SENT_GAMES_FILE, "w") as f:
-        json.dump(list(sent), f)
+def save_sent(data):
+    with open(SENT_FILE, "w") as f:
+        json.dump(list(data), f)
 
-# ─────────────────────────────────────────────
-# 🌐  RECUPÉRATION DES JEUX (DÉDUPLIQUÉS)
-# ─────────────────────────────────────────────
+# ─────────────────────────────
+# 🧠 DETECTION
+# ─────────────────────────────
+def detect_offer(game):
+    text = (game["title"] + " " + game.get("description","")).lower()
 
-async def fetch_epic_games(session: aiohttp.ClientSession) -> list:
+    if any(x in text for x in ["demo", "beta", "playtest", "dlc"]):
+        return "ignore"
+
+    if any(x in text for x in ["trial", "weekend", "try for free"]):
+        return "temporary"
+
+    if game["platform"] in ["Epic Games", "GOG", "Prime Gaming"]:
+        return "permanent"
+
+    return "unknown"
+
+# ─────────────────────────────
+# 📊 SCORE + VALEUR
+# ─────────────────────────────
+def score_game(game):
+    score = 0
+    title = game["title"].lower()
+
+    if len(title) > 12:
+        score += 1
+
+    if game["platform"] in ["Epic Games", "GOG"]:
+        score += 2
+
+    if any(w in title for w in ["ultimate", "definitive", "complete"]):
+        score += 2
+
+    if any(w in title for w in ["simulator"]):
+        score -= 1
+
+    return score
+
+def estimate_value(game):
+    title = game["title"].lower()
+
+    if "ultimate" in title:
+        return "50€+"
+    if "definitive" in title:
+        return "40€"
+    if len(title) > 15:
+        return "20-30€"
+
+    return "10-20€"
+
+# ─────────────────────────────
+# 🌐 FETCHERS
+# ─────────────────────────────
+async def fetch_epic(session):
     games = []
-    url = "https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions?locale=fr"
+    url = "https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions"
+
     try:
         async with session.get(url, timeout=10) as r:
-            if r.status == 200:
-                data = await r.json()
-                elements = data["data"]["Catalog"]["searchStore"]["elements"]
-                for el in elements:
-                    promos = el.get("promotions") or {}
-                    offers = promos.get("promotionalOffers", [])
-                    if offers and any(o["discountSetting"]["discountPercentage"] == 0 for o in offers[0]["promotionalOffers"]):
-                        slug = next((m["pageSlug"] for m in el.get("catalogNs", {}).get("mappings", []) if "pageSlug" in m), "")
-                        games.append({
-                            "platform": "Epic Games",
-                            "title": el.get("title", "Inconnu"),
-                            "url": f"https://store.epicgames.com/fr/p/{slug}" if slug else "https://store.epicgames.com/fr/free-games",
-                            "image": next((i["url"] for i in el.get("keyImages", []) if i["type"] == "OfferImageWide"), ""),
-                            "end_date": offers[0]["promotionalOffers"][0]["endDate"][:10],
-                        })
-    except: pass
+            data = await r.json()
+            for el in data["data"]["Catalog"]["searchStore"]["elements"]:
+                promos = el.get("promotions")
+                if not promos:
+                    continue
+
+                for offer in promos.get("promotionalOffers", []):
+                    for p in offer.get("promotionalOffers", []):
+                        if p["discountSetting"]["discountPercentage"] == 0:
+                            games.append({
+                                "platform": "Epic Games",
+                                "title": el["title"],
+                                "url": "https://store.epicgames.com",
+                                "description": "Epic giveaway"
+                            })
+    except Exception as e:
+        print("Erreur Epic:", e)
+
     return games
 
-async def fetch_gamerpower_games(session: aiohttp.ClientSession) -> list:
+
+async def fetch_gog(session):
     games = []
+    url = "https://www.gog.com/games/ajax/filtered?price=free"
+
     try:
-        async with session.get("https://www.gamerpower.com/api/giveaways?type=game", timeout=10) as r:
-            if r.status == 200:
-                for item in await r.json():
-                    raw = item.get("platforms", "").lower()
-                    matched = next((v for k, v in GAMERPOWER_PLATFORM_MAP.items() if k in raw), "Autre")
-                    games.append({
-                        "platform": matched,
-                        "title": item.get("title"),
-                        "url": item.get("open_giveaway_url"),
-                        "image": item.get("image"),
-                        "end_date": item.get("end_date", "N/A"),
-                        "description": item.get("description"),
-                    })
-    except: pass
+        async with session.get(url, timeout=10) as r:
+            data = await r.json()
+            for g in data.get("products", []):
+                games.append({
+                    "platform": "GOG",
+                    "title": g["title"],
+                    "url": f"https://gog.com{g['url']}",
+                    "description": "GOG free"
+                })
+    except Exception as e:
+        print("Erreur GOG:", e)
+
     return games
 
-async def fetch_all_free_games(session: aiohttp.ClientSession) -> list:
-    results = await asyncio.gather(fetch_epic_games(session), fetch_gamerpower_games(session), return_exceptions=True)
-    flat_list = [item for sublist in results if isinstance(sublist, list) for item in sublist]
-    
+
+async def fetch_steam(session):
+    games = []
+    url = "https://store.steampowered.com/search/?maxprice=free&specials=1"
+
+    try:
+        async with session.get(url, timeout=10) as r:
+            soup = BeautifulSoup(await r.text(), "html.parser")
+
+            for item in soup.select(".search_result_row")[:20]:
+                title_tag = item.select_one(".title")
+                if not title_tag:
+                    continue
+
+                title = title_tag.text
+
+                if any(x in title.lower() for x in ["demo", "dlc"]):
+                    continue
+
+                games.append({
+                    "platform": "Steam",
+                    "title": title,
+                    "url": item.get("href"),
+                    "description": "Steam deal"
+                })
+    except Exception as e:
+        print("Erreur Steam:", e)
+
+    return games
+
+# ─────────────────────────────
+# GLOBAL FETCH
+# ─────────────────────────────
+async def fetch_all(session):
+    results = await asyncio.gather(
+        fetch_epic(session),
+        fetch_gog(session),
+        fetch_steam(session)
+    )
+
+    flat = [g for sub in results for g in sub]
+
     seen, unique = set(), []
-    for g in flat_list:
-        clean_title = g['title'].lower().strip()
-        if clean_title not in seen:
-            seen.add(clean_title)
+    for g in flat:
+        key = f"{g['title']}_{g['platform']}".lower()
+        if key not in seen:
+            seen.add(key)
             unique.append(g)
+
     return unique
 
-# ─────────────────────────────────────────────
-# 🤖  COMMANDES ET LOGIQUE DU BOT
-# ─────────────────────────────────────────────
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+# ─────────────────────────────
+# EMBED
+# ─────────────────────────────
+def build_embed(game):
+    if not game.get("title") or not game.get("url"):
+        return None
 
-def build_embed(game: dict) -> discord.Embed:
-    platform = game.get("platform", "Inconnu")
+    score = score_game(game)
+    value = estimate_value(game)
+    offer = detect_offer(game)
+
+    badge = "🔥 PÉPITE" if score >= 4 else "🔥 BON PLAN" if score >= 3 else ""
+
     embed = discord.Embed(
-        title=f"🎁 {game['title']}",
-        url=game.get("url"),
-        description=game.get("description") or "Nouveau jeu gratuit disponible !",
-        color=PLATFORM_COLORS.get(platform, 0xFFFFFF),
+        title=f"{badge} {game['title']}",
+        url=game["url"],
+        description=f"{game['platform']}",
+        color=0x00ff99,
         timestamp=datetime.utcnow()
     )
-    embed.set_author(name=f"{PLATFORM_EMOJIS.get(platform, '🎮')} {platform}")
-    embed.add_field(name="⏳ Jusqu'au", value=f"`{game.get('end_date', 'N/A')}`", inline=True)
-    if game.get("image"): embed.set_image(url=game["image"])
-    embed.set_footer(text="Free Games Bot • L'escouade DO")
+
+    embed.add_field(name="🎯 Type", value=offer)
+    embed.add_field(name="⭐ Score", value=str(score))
+    embed.add_field(name="💰 Valeur", value=value)
+
     return embed
 
+# ─────────────────────────────
+# WATCHDOG
+# ─────────────────────────────
+LAST_RUN = time.time()
+
+def update_heartbeat():
+    global LAST_RUN
+    LAST_RUN = time.time()
+
+async def watchdog():
+    await bot.wait_until_ready()
+
+    while not bot.is_closed():
+        await asyncio.sleep(60)
+
+        if time.time() - LAST_RUN > 300:
+            print("⚠️ Bot bloqué → redémarrage loop")
+
+            try:
+                if loop.is_running():
+                    loop.cancel()
+                loop.start()
+            except Exception as e:
+                print("Erreur watchdog:", e)
+
+# ─────────────────────────────
+# LOOP
+# ─────────────────────────────
+@tasks.loop(minutes=CHECK_INTERVAL)
+async def loop():
+    update_heartbeat()
+
+    channel = bot.get_channel(CHANNEL_ID)
+    if not channel:
+        print("Channel introuvable")
+        return
+
+    sent = load_sent()
+
+    async with aiohttp.ClientSession() as session:
+        games = await fetch_all(session)
+
+    for g in games:
+        if detect_offer(g) == "ignore":
+            continue
+
+        key = f"{g['title']}_{g['platform']}".lower()
+
+        if key not in sent:
+            role_id = ROLE_MAP.get(g["platform"])
+            mention = f"<@&{role_id}>" if role_id else ""
+
+            embed = build_embed(g)
+            if not embed:
+                continue
+
+            await channel.send(
+                content=f"{mention} 🎮 Nouveau jeu détecté !",
+                embed=embed
+            )
+
+            sent.add(key)
+            await asyncio.sleep(1.5)
+
+    save_sent(sent)
+
+# ─────────────────────────────
+# EVENTS
+# ─────────────────────────────
 @bot.event
 async def on_ready():
-    print(f"✅ Bot prêt : {bot.user}")
-    if not check_free_games.is_running():
-        check_free_games.start()
+    print("🚀 BOT GOD TIER ONLINE")
 
-@tasks.loop(hours=CHECK_INTERVAL_HOURS)
-async def check_free_games():
-    channel = bot.get_channel(CHANNEL_ID)
-    if not channel: return
+    if not loop.is_running():
+        loop.start()
 
-    sent_games = load_sent_games()
-    async with aiohttp.ClientSession() as session:
-        games = await fetch_all_free_games(session)
+    bot.loop.create_task(watchdog())
 
-    new_found = False
-    for game in games:
-        key = f"{game['title']}".lower().strip()
-        if key not in sent_games:
-            mention = f"<@&{ROLE_ID}> " if ROLE_ID else ""
-            await channel.send(content=f"{mention}**Nouveau jeu gratuit détecté !**", embed=build_embed(game))
-            sent_games.add(key)
-            new_found = True
-            await asyncio.sleep(2) 
-
-    if new_found:
-        save_sent_games(sent_games)
-
-# --- COMMANDES UTILISATEURS ---
-
-@bot.command()
-async def freegames(ctx):
-    """Affiche tous les jeux gratuits actuels."""
-    async with ctx.typing():
-        async with aiohttp.ClientSession() as session:
-            games = await fetch_all_free_games(session)
-        if not games:
-            return await ctx.send("Rien pour le moment !")
-        for g in games[:8]: # Affiche les 8 premiers
-            await ctx.send(embed=build_embed(g))
-
-@bot.command()
-async def plateforme(ctx, *, name: str):
-    """Filtre les jeux par plateforme (ex: !plateforme Steam)."""
-    async with ctx.typing():
-        async with aiohttp.ClientSession() as session:
-            games = await fetch_all_free_games(session)
-        filtered = [g for g in games if name.lower() in g['platform'].lower()]
-        if not filtered:
-            return await ctx.send(f"Aucun jeu trouvé pour '{name}'.")
-        for g in filtered[:5]:
-            await ctx.send(embed=build_embed(g))
-
-@bot.command()
-async def plateformes(ctx):
-    """Liste les plateformes surveillées."""
-    liste = "\n".join([f"{emoji} {name}" for name, emoji in PLATFORM_EMOJIS.items()])
-    embed = discord.Embed(title="Plateformes surveillées", description=liste, color=0x3498DB)
-    await ctx.send(embed=embed)
-
-@bot.command()
-async def aide(ctx):
-    """Affiche ce menu d'aide."""
-    embed = discord.Embed(title="Aide du Free Games Bot", color=0x9B59B6)
-    embed.add_field(name="!freegames", value="Affiche les jeux gratuits actuels.", inline=False)
-    embed.add_field(name="!plateforme <nom>", value="Filtre par boutique (ex: !plateforme Epic).", inline=False)
-    embed.add_field(name="!plateformes", value="Liste toutes les boutiques surveillées.", inline=False)
-    embed.add_field(name="!check", value="Force une vérification (Admin).", inline=False)
-    await ctx.send(embed=embed)
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def check(ctx):
-    """Force un scan immédiat (Admin)."""
-    await ctx.send("🔄 Scan manuel lancé...")
-    await check_free_games()
-    await ctx.send("✅ Scan terminé.")
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def reset(ctx):
-    """Réinitialise l'historique (Admin)."""
-    if os.path.exists(SENT_GAMES_FILE):
-        os.remove(SENT_GAMES_FILE)
-        await ctx.send("🗑️ Historique vidé. Au prochain scan, tous les jeux seront renvoyés.")
-    else:
-        await ctx.send("L'historique est déjà vide.")
-
-if __name__ == "__main__":
-    bot.run(BOT_TOKEN)
+# ─────────────────────────────
+# AUTO-RESTART GLOBAL
+# ─────────────────────────────
+while True:
+    try:
+        bot.run(BOT_TOKEN)
+    except Exception as e:
+        print("💥 Crash détecté :", e)
+        time.sleep(5)
