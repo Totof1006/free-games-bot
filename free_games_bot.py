@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands, tasks
+from discord import app_commands
 import aiohttp
 import asyncio
 import os
@@ -138,12 +139,11 @@ async def fetch_games(session):
     return games
 
 # ─────────────────────────────────────────────
-# 🤖 BOT COMMANDS
+# 🤖 BOT COMMANDS (SLASH CONVERSION)
 # ─────────────────────────────────────────────
 
 intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+bot = commands.Bot(command_prefix="/", intents=intents, help_command=None)
 
 async def run_scan(target_channel=None):
     channel = target_channel or bot.get_channel(CHANNEL_ID)
@@ -172,60 +172,64 @@ async def scan_loop(): await run_scan()
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
+    try:
+        synced = await bot.tree.sync()
+        print(f"🔗 Synchronisé {len(synced)} commandes Slash")
+    except Exception as e:
+        print(f"❌ Erreur de synchro : {e}")
     if not scan_loop.is_running(): scan_loop.start()
 
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def lang(ctx, choice: str = None):
-    choice = choice.lower() if choice else ""
+@bot.tree.command(name="lang", description="Change la langue du bot pour ce salon")
+@app_commands.describe(choice="fr, en, or both")
+@app_commands.checks.has_permissions(administrator=True)
+async def lang(interaction: discord.Interaction, choice: str):
+    choice = choice.lower()
     if choice not in ["fr", "en", "both"]:
-        return await ctx.send("❌ Usage: `!lang fr` | `!lang en` | `!lang both`")
+        return await interaction.response.send_message("❌ Usage: `/lang fr` | `/lang en` | `/lang both`", ephemeral=True)
     
     settings = load_settings()
-    settings[str(ctx.channel.id)] = choice
+    settings[str(interaction.channel.id)] = choice
     save_settings(settings)
     
     confirm = "Mode bilingue activé !" if choice == "both" else LOCALES[choice]["LANG_CONFIRM"]
-    await ctx.send(confirm)
+    await interaction.response.send_message(confirm)
 
-@bot.command()
-async def aide(ctx):
-    embed = discord.Embed(title=get_text(ctx.channel.id, "HELP_TITLE"), color=0x3498DB)
-    embed.add_field(name="!aide / !help", value="Menu d'aide / Help menu", inline=False)
-    embed.add_field(name="!lang [fr/en/both]", value="*(Admin)* Change la langue / Change language", inline=False)
-    embed.add_field(name="!check", value="*(Admin)* Scan manuel / Manual scan", inline=False)
-    embed.add_field(name="!reset", value="*(Admin)* Reset l'historique / Clear history", inline=False)
-    await ctx.send(embed=embed)
+@bot.tree.command(name="aide", description="Menu d'aide")
+async def aide(interaction: discord.Interaction):
+    embed = discord.Embed(title=get_text(interaction.channel.id, "HELP_TITLE"), color=0x3498DB)
+    embed.add_field(name="/aide / /help", value="Menu d'aide / Help menu", inline=False)
+    embed.add_field(name="/lang [fr/en/both]", value="*(Admin)* Change la langue / Change language", inline=False)
+    embed.add_field(name="/check", value="*(Admin)* Scan manuel / Manual scan", inline=False)
+    embed.add_field(name="/reset", value="*(Admin)* Reset l'historique / Clear history", inline=False)
+    await interaction.response.send_message(embed=embed)
 
-@bot.command()
-async def help(ctx): await aide(ctx)
+@bot.tree.command(name="help", description="Help menu")
+async def help(interaction: discord.Interaction):
+    await aide(interaction)
 
-@bot.command()
-async def plateformes(ctx):
-    # Récupère le texte d'en-tête selon la langue du salon
-    header = "🛰️ **Boutiques surveillées :**" if get_text(ctx.channel.id, "PLATFORM") == "🎮 **Plateforme**" else "🛰️ **Monitored Stores:**"
-    
-    # Crée la liste à partir des clés du dictionnaire PLATFORM_COLORS
+@bot.tree.command(name="plateformes", description="Liste des boutiques surveillées")
+async def plateformes(interaction: discord.Interaction):
+    header = "🛰️ **Boutiques surveillées :**" if get_text(interaction.channel.id, "PLATFORM") == "🎮 **Plateforme**" else "🛰️ **Monitored Stores:**"
     liste = ", ".join(PLATFORM_COLORS.keys())
-    
-    await ctx.send(f"{header} {liste}")
+    await interaction.response.send_message(f"{header} {liste}")
 
-@bot.command()
-async def platforms(ctx):
-    """Alias en anglais pour la même commande"""
-    await plateformes(ctx)
+@bot.tree.command(name="platforms", description="List of monitored stores")
+async def platforms(interaction: discord.Interaction):
+    await plateformes(interaction)
 
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def check(ctx):
-    await ctx.send("🔎 Scan...")
-    await run_scan(ctx.channel)
+@bot.tree.command(name="check", description="Lancer un scan manuel des jeux")
+@app_commands.checks.has_permissions(administrator=True)
+async def check(interaction: discord.Interaction):
+    await interaction.response.send_message("🔎 Scan...")
+    await run_scan(interaction.channel)
 
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def reset(ctx):
+@bot.tree.command(name="reset", description="Réinitialiser l'historique des jeux envoyés")
+@app_commands.checks.has_permissions(administrator=True)
+async def reset(interaction: discord.Interaction):
     if os.path.exists(SENT_GAMES_FILE):
         os.remove(SENT_GAMES_FILE)
-        await ctx.send("✅ History cleared.")
+        await interaction.response.send_message("✅ History cleared.")
+    else:
+        await interaction.response.send_message("❌ No history file found.", ephemeral=True)
 
 bot.run(BOT_TOKEN)
