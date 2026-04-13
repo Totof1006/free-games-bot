@@ -669,30 +669,8 @@ async def on_app_command_error(
 # Bloc 4/4 — Commandes Slash + Status + Lancement
 # ─────────────────────────────────────────────
 
-@bot.tree.command(name="lang", description="Change la langue du bot pour ce salon")
-@app_commands.describe(choice="fr, en, both")
-@app_commands.checks.has_permissions(administrator=True)
-async def cmd_lang(interaction: discord.Interaction, choice: str) -> None:
-    choice = choice.lower().strip()
-    if choice not in ("fr", "en", "both"):
-        return await interaction.response.send_message(
-            "❌ Valeurs acceptées : `fr`, `en`, `both`", ephemeral=True
-        )
-
-    await bot.db.set_lang(interaction.channel.id, choice)
-
-    if choice == "both":
-        confirm = LOCALES["fr"]["LANG_CONFIRM_BOTH"]
-    elif choice == "fr":
-        confirm = LOCALES["fr"]["LANG_CONFIRM_FR"]
-    else:
-        confirm = LOCALES["en"]["LANG_CONFIRM_EN"]
-
-    await interaction.response.send_message(confirm)
-
-
-@bot.tree.command(name="aide", description="Menu d'aide")
-async def cmd_aide(interaction: discord.Interaction) -> None:
+async def _send_help_embed(interaction: discord.Interaction):
+    """Logique partagée pour le menu d'aide afin d'éviter le conflit 'Command object is not callable'"""
     lang = bot.db.get_lang(interaction.channel.id)
 
     if lang == "fr":
@@ -742,9 +720,36 @@ async def cmd_aide(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+@bot.tree.command(name="lang", description="Change la langue du bot pour ce salon")
+@app_commands.describe(choice="fr, en, both")
+@app_commands.checks.has_permissions(administrator=True)
+async def cmd_lang(interaction: discord.Interaction, choice: str) -> None:
+    choice = choice.lower().strip()
+    if choice not in ("fr", "en", "both"):
+        return await interaction.response.send_message(
+            "❌ Valeurs acceptées : `fr`, `en`, `both`", ephemeral=True
+        )
+
+    await bot.db.set_lang(interaction.channel.id, choice)
+
+    if choice == "both":
+        confirm = LOCALES["fr"]["LANG_CONFIRM_BOTH"]
+    elif choice == "fr":
+        confirm = LOCALES["fr"]["LANG_CONFIRM_FR"]
+    else:
+        confirm = LOCALES["en"]["LANG_CONFIRM_EN"]
+
+    await interaction.response.send_message(confirm)
+
+
+@bot.tree.command(name="aide", description="Menu d'aide")
+async def cmd_aide(interaction: discord.Interaction) -> None:
+    await _send_help_embed(interaction)
+
+
 @bot.tree.command(name="help", description="Help menu")
 async def cmd_help(interaction: discord.Interaction) -> None:
-    await cmd_aide(interaction)
+    await _send_help_embed(interaction)
 
 
 @bot.tree.command(name="platforms", description="Liste des boutiques surveillées / Monitored stores")
@@ -784,6 +789,7 @@ async def cmd_platforms_test(interaction: discord.Interaction) -> None:
 
         lines = [
             "🧪 **Test de fetch en direct**",
+            # Correction mineure de l'affichage si nécessaire
             f"• Jeux bruts récupérés : **{total_raw}**",
             f"• Jeux fusionnés (sans doublons) : **{total_aggregated}**",
             "",
@@ -854,10 +860,6 @@ async def cmd_reset(interaction: discord.Interaction) -> None:
             str(e)
         )
 
-
-# ─────────────────────────────────────────────
-# 📊 /status (Admin)
-# ─────────────────────────────────────────────
 
 import platform
 import time
@@ -934,11 +936,6 @@ async def cmd_status(interaction: discord.Interaction) -> None:
         "[ADMIN] /status exécuté",
         fields=[("Utilisateur", interaction.user.mention, True)]
     )
-
-
-# ─────────────────────────────────────────────
-# 🚀 LANCEMENT
-# ─────────────────────────────────────────────
 
 if __name__ == "__main__":
     bot.run(BOT_TOKEN)
