@@ -1,6 +1,5 @@
 # ─────────────────────────────────────────────
 # FREE GAMES BOT – V2 ENTREPRISE (single file)
-# Bloc 1/5 — Imports, Config, DataManager, Fetchers + Enrichissements
 # ─────────────────────────────────────────────
 
 import asyncio
@@ -501,6 +500,8 @@ async def fetch_gamerpower(session: aiohttp.ClientSession) -> List[Dict[str, Any
         async with session.get(url, timeout=15) as r:
             r.raise_for_status()
             data = await r.json()
+
+        tasks = []
         for item in data:
             if item.get("status", "").lower() == "expired":
                 continue
@@ -513,16 +514,18 @@ async def fetch_gamerpower(session: aiohttp.ClientSession) -> List[Dict[str, Any
             }
 
             if platform == "Steam":
-                game = await enrich_with_steam(game, session)
+                tasks.append(enrich_with_steam(game, session))
             elif platform == "GOG":
-                game = await enrich_with_gog(game, session)
+                tasks.append(enrich_with_gog(game, session))
             elif platform == "Xbox":
-                game = await enrich_with_xbox(game, session)
+                tasks.append(enrich_with_xbox(game, session))
             elif platform == "PlayStation":
-                game = await enrich_with_psn(game, session)
+                tasks.append(enrich_with_psn(game, session))
+            else:
+                tasks.append(asyncio.sleep(0, result=game))
 
-            games.append(game)
-
+        if tasks:
+            games = await asyncio.gather(*tasks)
         log.info(f"GamerPower: {len(games)} jeu(x) trouvé(s)")
     except Exception as e:
         log.error(f"Erreur GamerPower Fetch: {e}", exc_info=True)
@@ -679,6 +682,11 @@ class UltimateBot(commands.Bot):
 
     async def on_ready(self) -> None:
         log.info(f"🚀 Connecté : {self.user} (ID: {self.user.id})")
+        for guild in self.guilds:
+            log.info(f"🛡️ Guild: {guild.name} (ID: {guild.id})")
+        log.info(f"📡 Salon de scan configuré : {CHANNEL_ID}")
+        log.info(f"📨 Salon de logs : {os.getenv('LOG_CHANNEL_ID')}")
+
         try:
             synced = await self.tree.sync()
             log.info(f"🔗 {len(synced)} commandes slash synchronisées")
@@ -740,7 +748,11 @@ async def send_log_embed(level: str, title: str, description: str = "", fields=N
 
 @tasks.loop(seconds=CHECK_INTERVAL)
 async def scan_loop():
-    await run_scan()
+    try:
+        await asyncio.wait_for(run_scan(), timeout=45)
+    except asyncio.TimeoutError:
+        log.error("⏳ Scan annulé : timeout global dépassé")
+        await send_log_embed(LogLevel.ERROR, "Timeout global du scan")
 
 
 async def run_scan():
@@ -785,7 +797,15 @@ async def run_scan():
                 )
 
                 await channel.send(role_mention, embed=embed)
-                await bot.db.mark_as_reported(gid)
+                try:
+                    await bot.db.mark_as_reported(gid)
+                except Exception as e:
+                    log.error(f"Erreur DB lors du marquage du jeu {gid}: {e}")
+                    await send_log_embed(
+                        LogLevel.ERROR,
+                        "Erreur DB mark_as_reported",
+                        str(e),
+                    )
 
                 await send_log_embed(
                     LogLevel.INFO,
@@ -837,7 +857,7 @@ async def status_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(
         f"🤖 **Bot opérationnel !**\n"
         f"📡 Scan toutes les **{CHECK_INTERVAL} secondes**\n"
-        f"📁 Jeux déjà envoyés : **{len(bot.db.reported_ids)}**",
+        f"📁 Jeux déjà envoyés : **{len(bot.db.sent_cache)}**",
         ephemeral=True,
     )
 
@@ -852,18 +872,17 @@ async def force_scan_cmd(interaction: discord.Interaction):
 @bot.tree.command(name="reload", description="Recharge la configuration du bot (admin)")
 @app_commands.checks.has_permissions(administrator=True)
 async def reload_cmd(interaction: discord.Interaction):
-    await bot.db.load_config()
+    await bot.db.setup()
     await interaction.response.send_message("🔄 Configuration rechargée.", ephemeral=True)
 
-
-# ─────────────────────────────────────────────
-# 🧹 UTILITAIRES
-# ─────────────────────────────────────────────
 
 @bot.tree.command(name="clear_reported", description="Réinitialise la liste des jeux envoyés (admin)")
 @app_commands.checks.has_permissions(administrator=True)
 async def clear_reported_cmd(interaction: discord.Interaction):
-    bot.db.reported_ids.clear()
+    bot.db.sent_cache.clear()
+    if bot.db.db:
+        await bot.db.db.execute("DELETE FROM sent_games")
+        await bot.db.db.commit()
     await interaction.response.send_message("🗑️ Liste des jeux envoyés réinitialisée.", ephemeral=True)
     await send_log_embed(LogLevel.WARNING, "Liste des jeux envoyés réinitialisée")
 
@@ -876,7 +895,7 @@ async def set_lang_cmd(interaction: discord.Interaction, lang: str):
         await interaction.response.send_message("❌ Langue invalide. Choisissez `fr` ou `en`.", ephemeral=True)
         return
 
-    await bot.db.set_language(interaction.channel_id, lang)
+    await bot.db.set_lang(interaction.channel_id, lang)
     await interaction.response.send_message(f"🌍 Langue définie sur **{lang}**.", ephemeral=True)
 
 
@@ -885,11 +904,7 @@ async def set_lang_cmd(interaction: discord.Interaction, lang: str):
 # ─────────────────────────────────────────────
 
 def main():
-    token = os.getenv("DISCORD_TOKEN")
-    if not token:
-        raise RuntimeError("DISCORD_TOKEN manquant dans les variables d'environnement.")
-
-    bot.run(token)
+    bot.run(BOT_TOKEN)
 
 
 if __name__ == "__main__":
