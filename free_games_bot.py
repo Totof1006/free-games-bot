@@ -202,9 +202,6 @@ async def fetch_epic(session: aiohttp.ClientSession) -> List[Dict[str, Any]]:
         log.error(f"Erreur Epic Fetch: {e}", exc_info=True)
     return games
 
-# ─────────────────────────────────────────────
-# Bloc 2/4 — GamerPower, Aggregation, Embeds, Bot Core
-# ─────────────────────────────────────────────
 
 def _normalize_platform_from_gamerpower(platforms_raw: str) -> str:
     p = (platforms_raw or "").lower()
@@ -387,7 +384,6 @@ def build_embed(game: Dict[str, Any], channel_id: int, db: DataManager) -> Optio
 
     return embed
 
-
 # ─────────────────────────────────────────────
 # 🤖 BOT CORE
 # ─────────────────────────────────────────────
@@ -476,7 +472,6 @@ async def send_log_embed(
         await channel.send(embed=embed)
     except Exception as e:
         log.error(f"Erreur lors de l'envoi d'un log embed: {e}", exc_info=True)
-
 
 # ─────────────────────────────────────────────
 # 🔎 SCAN ENGINE
@@ -698,18 +693,53 @@ async def cmd_lang(interaction: discord.Interaction, choice: str) -> None:
 
 @bot.tree.command(name="aide", description="Menu d'aide")
 async def cmd_aide(interaction: discord.Interaction) -> None:
+    lang = bot.db.get_lang(interaction.channel.id)
+
+    if lang == "fr":
+        title = "🎮 Aide - Free Games Bot"
+        public_title = "🟢 Commandes publiques"
+        admin_title = "🛡️ Commandes administrateur"
+    elif lang == "en":
+        title = "🎮 Help - Free Games Bot"
+        public_title = "🟢 Public commands"
+        admin_title = "🛡️ Administrator commands"
+    else:
+        title = "🎮 Aide / Help - Free Games Bot"
+        public_title = "🟢 Commandes publiques / Public commands"
+        admin_title = "🛡️ Commandes administrateur / Admin commands"
+
     embed = discord.Embed(
-        title=bot.db.get_text(interaction.channel.id, "HELP_TITLE"),
+        title=title,
         color=0x3498DB,
     )
-    embed.add_field(name="/aide", value="Menu d'aide / Help menu", inline=False)
-    embed.add_field(name="/help", value="Alias de /aide", inline=False)
-    embed.add_field(name="/lang [fr/en/both]", value="*(Admin)* Change la langue", inline=False)
-    embed.add_field(name="/check", value="*(Admin)* Scan manuel", inline=False)
-    embed.add_field(name="/platforms", value="Liste des boutiques surveillées", inline=False)
-    embed.add_field(name="/platforms_test", value="*(Admin)* Test de fetch en direct", inline=False)
 
-    await interaction.response.send_message(embed=embed)
+    public_value = (
+        "• `/aide` — Menu d'aide / Help menu\n"
+        "• `/help` — Alias de `/aide`\n"
+        "• `/platforms` — Boutiques surveillées / Monitored stores\n"
+    )
+
+    admin_value = (
+        "• `/lang [fr/en/both]` — Change la langue du salon\n"
+        "• `/check` — Force un scan manuel\n"
+        "• `/platforms_test` — Test de fetch en direct\n"
+        "• `/reset` — Réinitialise les jeux déjà envoyés\n"
+        "• `/status` — Affiche l'état du bot et son uptime\n"
+    )
+
+    embed.add_field(
+        name=public_title,
+        value=public_value,
+        inline=False,
+    )
+    embed.add_field(
+        name=admin_title,
+        value=admin_value,
+        inline=False,
+    )
+
+    embed.set_footer(text="Free Games Bot • Slash commands")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="help", description="Help menu")
