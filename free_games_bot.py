@@ -1,12 +1,7 @@
-"""
-FREE GAMES BOT – V2 ENTREPRISE (single file, multi-plateformes fusionnées)
-Stack: discord.py, aiosqlite, aiohttp
-Features:
-- Persistent async DB (aiosqlite) + in-memory cache
-- Multi-fetchers: Epic (officiel) + GamerPower (multi-plateformes)
-- Fusion par jeu (titre) + agrégation des plateformes
-- Zéro doublon, même si un jeu est sur plusieurs plateformes
-"""
+# ─────────────────────────────────────────────
+# FREE GAMES BOT – V2 ENTREPRISE (single file)
+# Bloc 1/4 — Imports, Config, DataManager, Fetchers
+# ─────────────────────────────────────────────
 
 import asyncio
 import hashlib
@@ -156,7 +151,6 @@ class DataManager:
             return en
         return f"{fr} / {en}"
 
-
 # ─────────────────────────────────────────────
 # 🌐 FETCHERS
 # ─────────────────────────────────────────────
@@ -208,6 +202,9 @@ async def fetch_epic(session: aiohttp.ClientSession) -> List[Dict[str, Any]]:
         log.error(f"Erreur Epic Fetch: {e}", exc_info=True)
     return games
 
+# ─────────────────────────────────────────────
+# Bloc 2/4 — GamerPower, Aggregation, Embeds, Bot Core
+# ─────────────────────────────────────────────
 
 def _normalize_platform_from_gamerpower(platforms_raw: str) -> str:
     p = (platforms_raw or "").lower()
@@ -278,10 +275,6 @@ async def fetch_games(session: aiohttp.ClientSession) -> List[Dict[str, Any]]:
 # 🎁 FUSION MULTI-PLATEFORMES & EMBEDS
 # ─────────────────────────────────────────────
 def aggregate_games_by_title(raw_games: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Regroupe les jeux par titre (case-insensitive) et fusionne les plateformes.
-    Choisit une URL et une image "best effort" (Epic prioritaire).
-    """
     by_title: Dict[str, Dict[str, Any]] = {}
 
     for g in raw_games:
@@ -306,7 +299,6 @@ def aggregate_games_by_title(raw_games: List[Dict[str, Any]]) -> List[Dict[str, 
             by_title[key]["platforms"].add(platform)
             by_title[key]["sources"].append(g)
 
-            # Priorité URL / image : Epic > GamerPower > autres
             current_url = by_title[key]["url"]
             current_image = by_title[key]["image"]
 
@@ -320,7 +312,6 @@ def aggregate_games_by_title(raw_games: List[Dict[str, Any]]) -> List[Dict[str, 
             elif not current_image and image:
                 by_title[key]["image"] = image
 
-    # Convertir les sets en listes
     aggregated: List[Dict[str, Any]] = []
     for key, data in by_title.items():
         aggregated.append(
@@ -346,7 +337,6 @@ def build_embed(game: Dict[str, Any], channel_id: int, db: DataManager) -> Optio
     if any(x in lower_title for x in ["demo", "beta", "playtest", "trial"]):
         return None
 
-    # Score basé sur la "qualité" des plateformes
     score = 1
     premium_platforms = {"Epic Games", "Steam", "GOG", "PlayStation", "Xbox", "Nintendo eShop"}
     if any(p in premium_platforms for p in platforms):
@@ -356,7 +346,6 @@ def build_embed(game: Dict[str, Any], channel_id: int, db: DataManager) -> Optio
     if len(platforms) >= 3:
         score += 1
 
-    # Couleur : si une plateforme "connue" est présente, on prend la première
     color = PLATFORM_COLORS["Other"]
     for p in platforms:
         if p in PLATFORM_COLORS:
@@ -370,7 +359,6 @@ def build_embed(game: Dict[str, Any], channel_id: int, db: DataManager) -> Optio
         timestamp=datetime.now(timezone.utc),
     )
 
-    # Plateformes : phrase adaptée
     if len(platforms) == 1:
         platforms_text = platforms[0]
     else:
@@ -434,8 +422,66 @@ class UltimateBot(commands.Bot):
 bot = UltimateBot()
 
 # ─────────────────────────────────────────────
+# Bloc 3/4 — Scan Engine + ULTRA‑PRO Logs + Slash Errors
+# ─────────────────────────────────────────────
+
+# ─────────────────────────────────────────────
+# 🟥 ULTRA‑PRO LOG SYSTEM (ajout officiel)
+# ─────────────────────────────────────────────
+
+LOG_CHANNEL_ID = 1480958930757877791  # Salon logs-automod
+
+from enum import Enum
+
+class LogLevel(Enum):
+    INFO = ("INFO", 0x3498DB, "ℹ️")
+    SUCCESS = ("SUCCESS", 0x2ECC71, "✅")
+    WARNING = ("WARNING", 0xE67E22, "⚠️")
+    ERROR = ("ERROR", 0xE74C3C, "❌")
+    CRITICAL = ("CRITICAL", 0x8E44AD, "🛑")
+
+    @property
+    def label(self): return self.value[0]
+    @property
+    def color(self): return self.value[1]
+    @property
+    def emoji(self): return self.value[2]
+
+
+async def send_log_embed(
+    level: LogLevel,
+    title: str,
+    description: str | None = None,
+    fields: list[tuple[str, str, bool]] | None = None,
+) -> None:
+    """Envoie un embed ULTRA‑PRO dans logs-automod."""
+    channel = bot.get_channel(LOG_CHANNEL_ID)
+    if not channel:
+        log.warning(f"[LOGS] Salon introuvable (ID={LOG_CHANNEL_ID})")
+        return
+
+    embed = discord.Embed(
+        title=f"{level.emoji} {title}",
+        description=description or "",
+        color=level.color,
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.set_footer(text="Free Games Bot • Logs")
+
+    if fields:
+        for name, value, inline in fields:
+            embed.add_field(name=name, value=value, inline=inline)
+
+    try:
+        await channel.send(embed=embed)
+    except Exception as e:
+        log.error(f"Erreur lors de l'envoi d'un log embed: {e}", exc_info=True)
+
+
+# ─────────────────────────────────────────────
 # 🔎 SCAN ENGINE
 # ─────────────────────────────────────────────
+
 def _build_mention() -> str:
     if isinstance(ROLE_ID, str) and ROLE_ID == "everyone":
         return "@everyone "
@@ -447,26 +493,58 @@ def _build_mention() -> str:
 async def run_scan() -> None:
     if bot.scan_lock.locked():
         log.info("Scan déjà en cours, skip.")
+        await send_log_embed(
+            LogLevel.WARNING,
+            "[SCAN] Scan ignoré",
+            "Un scan est déjà en cours."
+        )
         return
 
     async with bot.scan_lock:
         channel = bot.get_channel(CHANNEL_ID)
         if not channel:
             log.error(f"Channel introuvable (ID={CHANNEL_ID})")
+            await send_log_embed(
+                LogLevel.ERROR,
+                "[SCAN] Channel introuvable",
+                f"Impossible d'envoyer dans le salon ID={CHANNEL_ID}"
+            )
             return
 
         if not bot.session:
             log.error("Session HTTP non initialisée.")
+            await send_log_embed(
+                LogLevel.CRITICAL,
+                "[SCAN] Session HTTP absente",
+                "La session aiohttp n'est pas initialisée."
+            )
             return
+
+        await send_log_embed(
+            LogLevel.INFO,
+            "[SCAN] Scan lancé",
+            fields=[("Intervalle", f"{CHECK_INTERVAL} sec", True)]
+        )
 
         try:
             raw_games = await fetch_games(bot.session)
         except Exception as e:
             log.error(f"Erreur lors du fetch des jeux: {e}", exc_info=True)
+            await send_log_embed(
+                LogLevel.ERROR,
+                "[FETCH] Erreur globale",
+                str(e)
+            )
             return
 
         aggregated_games = aggregate_games_by_title(raw_games)
         log.info(f"Jeux agrégés (par titre): {len(aggregated_games)}")
+
+        await send_log_embed(
+            LogLevel.INFO,
+            "[SCAN] Agrégation terminée",
+            fields=[("Jeux agrégés", str(len(aggregated_games)), True)]
+        )
 
         mention = _build_mention()
         new_count = 0
@@ -476,7 +554,6 @@ async def run_scan() -> None:
             if not title:
                 continue
 
-            # Hash basé uniquement sur le titre normalisé → un seul message par jeu
             key = title.lower().strip()
             game_hash = hashlib.sha256(key.encode()).hexdigest()
 
@@ -494,19 +571,50 @@ async def run_scan() -> None:
                 )
                 await bot.db.mark_as_reported(game_hash)
                 new_count += 1
-                log.info(
-                    f"✅ Notifié : {title} (plateformes: {', '.join(g.get('platforms', []))})"
+
+                await send_log_embed(
+                    LogLevel.SUCCESS,
+                    "[GAME] Nouveau jeu envoyé",
+                    fields=[
+                        ("Titre", title, False),
+                        ("Plateformes", ", ".join(g.get("platforms", [])), False),
+                    ]
                 )
+
                 await asyncio.sleep(2)
+
             except discord.Forbidden:
                 log.error(f"Permission manquante pour envoyer dans #{channel.name}")
+                await send_log_embed(
+                    LogLevel.ERROR,
+                    "[DISCORD] Permission manquante",
+                    f"Impossible d'envoyer dans {channel.mention}"
+                )
                 break
+
             except discord.HTTPException as e:
                 log.error(f"Erreur HTTP Discord lors de l'envoi: {e}", exc_info=True)
+                await send_log_embed(
+                    LogLevel.ERROR,
+                    "[DISCORD] Erreur HTTP",
+                    str(e)
+                )
+
             except Exception as e:
                 log.error(f"Erreur inattendue lors de l'envoi: {e}", exc_info=True)
+                await send_log_embed(
+                    LogLevel.ERROR,
+                    "[DISCORD] Erreur inattendue",
+                    str(e)
+                )
 
         log.info(f"Scan terminé. Nouveaux jeux envoyés: {new_count}")
+
+        await send_log_embed(
+            LogLevel.INFO,
+            "[SCAN] Scan terminé",
+            fields=[("Nouveaux jeux envoyés", str(new_count), True)]
+        )
 
 
 @tasks.loop(seconds=CHECK_INTERVAL)
@@ -515,16 +623,27 @@ async def scan_loop() -> None:
         await run_scan()
     except Exception as e:
         log.error(f"Crash dans la loop de scan: {e}", exc_info=True)
+        await send_log_embed(
+            LogLevel.CRITICAL,
+            "[SCAN] Crash dans scan_loop",
+            str(e)
+        )
 
 
 @scan_loop.error
 async def scan_loop_error(error: Exception) -> None:
     log.error(f"Erreur dans scan_loop: {error}", exc_info=True)
+    await send_log_embed(
+        LogLevel.ERROR,
+        "[SCAN] Erreur dans scan_loop",
+        str(error)
+    )
 
 
 # ─────────────────────────────────────────────
 # 🛡️ ERREURS SLASH
 # ─────────────────────────────────────────────
+
 @bot.tree.error
 async def on_app_command_error(
     interaction: discord.Interaction,
@@ -534,17 +653,27 @@ async def on_app_command_error(
         await interaction.response.send_message(
             "❌ Permissions insuffisantes.", ephemeral=True
         )
+        await send_log_embed(
+            LogLevel.WARNING,
+            "[ADMIN] Permissions insuffisantes",
+            f"Commande : {interaction.command}"
+        )
     else:
         log.error(f"Erreur commande slash {interaction.command}: {error}", exc_info=True)
+        await send_log_embed(
+            LogLevel.ERROR,
+            "[SLASH] Erreur interne",
+            str(error)
+        )
         if not interaction.response.is_done():
             await interaction.response.send_message(
                 "❌ Une erreur interne est survenue.", ephemeral=True
             )
 
+# ─────────────────────────────────────────────
+# Bloc 4/4 — Commandes Slash + Status + Lancement
+# ─────────────────────────────────────────────
 
-# ─────────────────────────────────────────────
-# 🛰️ COMMANDES SLASH
-# ─────────────────────────────────────────────
 @bot.tree.command(name="lang", description="Change la langue du bot pour ce salon")
 @app_commands.describe(choice="fr, en, both")
 @app_commands.checks.has_permissions(administrator=True)
@@ -573,51 +702,213 @@ async def cmd_aide(interaction: discord.Interaction) -> None:
         title=bot.db.get_text(interaction.channel.id, "HELP_TITLE"),
         color=0x3498DB,
     )
-    embed.add_field(
-        name="/aide",
-        value="Menu d'aide / Help menu",
-        inline=False,
-    )
-    embed.add_field(
-        name="/lang [fr/en/both]",
-        value="*(Admin)* Change la langue / Change language",
-        inline=False,
-    )
-    embed.add_field(
-        name="/check",
-        value="*(Admin)* Scan manuel / Manual scan",
-        inline=False,
-    )
-    embed.add_field(
-        name="/plateformes",
-        value="Liste des boutiques surveillées / Monitored stores",
-        inline=False,
-    )
+    embed.add_field(name="/aide", value="Menu d'aide / Help menu", inline=False)
+    embed.add_field(name="/help", value="Alias de /aide", inline=False)
+    embed.add_field(name="/lang [fr/en/both]", value="*(Admin)* Change la langue", inline=False)
+    embed.add_field(name="/check", value="*(Admin)* Scan manuel", inline=False)
+    embed.add_field(name="/platforms", value="Liste des boutiques surveillées", inline=False)
+    embed.add_field(name="/platforms_test", value="*(Admin)* Test de fetch en direct", inline=False)
+
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="plateformes", description="Liste des boutiques surveillées")
-async def cmd_plateformes(interaction: discord.Interaction) -> None:
+@bot.tree.command(name="help", description="Help menu")
+async def cmd_help(interaction: discord.Interaction) -> None:
+    await cmd_aide(interaction)
+
+
+@bot.tree.command(name="platforms", description="Liste des boutiques surveillées / Monitored stores")
+async def cmd_platforms(interaction: discord.Interaction) -> None:
     lang = bot.db.get_lang(interaction.channel.id)
+
     if lang == "fr":
         header = "🛰️ **Boutiques surveillées :**"
     elif lang == "en":
         header = "🛰️ **Monitored stores:**"
     else:
         header = "🛰️ **Boutiques surveillées / Monitored stores:**"
+
     liste = ", ".join(sorted(PLATFORM_COLORS.keys()))
     await interaction.response.send_message(f"{header} {liste}")
+
+
+@bot.tree.command(name="platforms_test", description="Test de fetch en direct (Admin uniquement)")
+@app_commands.checks.has_permissions(administrator=True)
+async def cmd_platforms_test(interaction: discord.Interaction) -> None:
+    await interaction.response.send_message("⏳ Test des fetchers en cours...", ephemeral=True)
+
+    if not bot.session:
+        return await interaction.followup.send("❌ Session HTTP non initialisée.", ephemeral=True)
+
+    try:
+        raw_games = await fetch_games(bot.session)
+        aggregated = aggregate_games_by_title(raw_games)
+
+        total_raw = len(raw_games)
+        total_aggregated = len(aggregated)
+
+        platform_count = {}
+        for g in aggregated:
+            for p in g.get("platforms", []):
+                platform_count[p] = platform_count.get(p, 0) + 1
+
+        lines = [
+            "🧪 **Test de fetch en direct**",
+            f"• Jeux bruts récupérés : **{total_raw}**",
+            f"• Jeux fusionnés (sans doublons) : **{total_aggregated}**",
+            "",
+            "📊 **Répartition par plateforme :**"
+        ]
+
+        for p, count in sorted(platform_count.items(), key=lambda x: -x[1]):
+            lines.append(f"• **{p}** : {count}")
+
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+        await send_log_embed(
+            LogLevel.INFO,
+            "[ADMIN] /platforms_test exécuté",
+            fields=[("Utilisateur", interaction.user.mention, True)]
+        )
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erreur lors du test : {e}", ephemeral=True)
+        log.error(f"Erreur /platforms_test : {e}", exc_info=True)
+        await send_log_embed(
+            LogLevel.ERROR,
+            "[ADMIN] Erreur /platforms_test",
+            str(e)
+        )
 
 
 @bot.tree.command(name="check", description="Force un scan manuel")
 @app_commands.checks.has_permissions(administrator=True)
 async def cmd_check(interaction: discord.Interaction) -> None:
     await interaction.response.send_message("🔎 Scan manuel lancé...", ephemeral=True)
+
+    await send_log_embed(
+        LogLevel.INFO,
+        "[ADMIN] /check exécuté",
+        fields=[("Utilisateur", interaction.user.mention, True)]
+    )
+
     await run_scan()
+
+
+@bot.tree.command(name="reset", description="*(Admin)* Réinitialise les jeux déjà envoyés")
+@app_commands.checks.has_permissions(administrator=True)
+async def cmd_reset(interaction: discord.Interaction) -> None:
+    await interaction.response.send_message("🗑️ Réinitialisation en cours...", ephemeral=True)
+
+    try:
+        await bot.db.db.execute("DELETE FROM sent_games")
+        await bot.db.db.commit()
+        bot.db.sent_cache.clear()
+
+        await interaction.followup.send("✅ La liste des jeux envoyés a été réinitialisée.", ephemeral=True)
+        log.info("🗑️ Commande /reset exécutée : cache + DB vidés.")
+
+        await send_log_embed(
+            LogLevel.WARNING,
+            "[ADMIN] /reset exécuté",
+            "Cache + DB vidés.",
+            fields=[("Utilisateur", interaction.user.mention, True)]
+        )
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erreur lors du reset : {e}", ephemeral=True)
+        log.error(f"Erreur /reset : {e}", exc_info=True)
+        await send_log_embed(
+            LogLevel.ERROR,
+            "[ADMIN] Erreur /reset",
+            str(e)
+        )
+
+
+# ─────────────────────────────────────────────
+# 📊 /status (Admin)
+# ─────────────────────────────────────────────
+
+import platform
+import time
+
+BOT_START_TIME = time.time()
+
+@bot.tree.command(name="status", description="*(Admin)* Affiche l'état du bot et son uptime")
+@app_commands.checks.has_permissions(administrator=True)
+async def cmd_status(interaction: discord.Interaction) -> None:
+    await interaction.response.send_message("📡 Récupération du statut...", ephemeral=True)
+
+    uptime_seconds = int(time.time() - BOT_START_TIME)
+    days = uptime_seconds // 86400
+    hours = (uptime_seconds % 86400) // 3600
+    minutes = (uptime_seconds % 3600) // 60
+    seconds = uptime_seconds % 60
+
+    if days > 0:
+        uptime_str = f"{days}j {hours}h {minutes}m"
+    else:
+        uptime_str = f"{hours}h {minutes}m {seconds}s"
+
+    latency_ms = round(bot.latency * 1000)
+    scan_state = "⏳ En cours" if bot.scan_lock.locked() else "✔️ Disponible"
+    next_scan = f"{CHECK_INTERVAL // 60} min" if CHECK_INTERVAL >= 60 else f"{CHECK_INTERVAL} sec"
+
+    try:
+        async with bot.db.db.execute("SELECT COUNT(*) FROM sent_games") as cursor:
+            (sent_count,) = await cursor.fetchone()
+        async with bot.db.db.execute("SELECT COUNT(*) FROM settings") as cursor:
+            (settings_count,) = await cursor.fetchone()
+        db_state = "OK"
+    except Exception:
+        db_state = "❌ Erreur"
+        sent_count = 0
+        settings_count = 0
+
+    http_state = "Oui" if bot.session and not bot.session.closed else "Non"
+    python_version = platform.python_version()
+    discord_version = discord.__version__
+
+    lines = [
+        "🛰️ **Free Games Bot — Status**",
+        "",
+        f"⏱️ **Uptime :** {uptime_str}",
+        f"📡 **Latence Discord :** {latency_ms} ms",
+        "",
+        "🔎 **Scan :**",
+        f"• État : {scan_state}",
+        f"• Prochain scan dans : {next_scan}",
+        "",
+        "🗄️ **Base de données :**",
+        f"• Connexion : {db_state}",
+        f"• Jeux enregistrés : {sent_count}",
+        f"• Salons configurés : {settings_count}",
+        "",
+        "⚡ **Cache mémoire :**",
+        f"• Jeux envoyés : {len(bot.db.sent_cache)}",
+        f"• Langues configurées : {len(bot.db.settings_cache)}",
+        "",
+        "🌐 **Session HTTP :**",
+        f"• Ouverte : {http_state}",
+        f"• User-Agent : FreeGamesBot/2.0",
+        "",
+        "🤖 **Version :**",
+        f"• Python : {python_version}",
+        f"• discord.py : {discord_version}",
+    ]
+
+    await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+    await send_log_embed(
+        LogLevel.INFO,
+        "[ADMIN] /status exécuté",
+        fields=[("Utilisateur", interaction.user.mention, True)]
+    )
 
 
 # ─────────────────────────────────────────────
 # 🚀 LANCEMENT
 # ─────────────────────────────────────────────
+
 if __name__ == "__main__":
     bot.run(BOT_TOKEN)
