@@ -1,6 +1,5 @@
 # ─────────────────────────────────────────────
-# FREE GAMES BOT – V2 ENTREPRISE (single file)
-# Version complète : enrichissements + logs ULTRA‑PRO + correctifs
+# FREE GAMES BOT – V3 (single file, solide & stable)
 # ─────────────────────────────────────────────
 
 import asyncio
@@ -8,6 +7,7 @@ import hashlib
 import logging
 import os
 import platform
+import re
 import time
 from datetime import datetime, timezone
 from typing import Optional, Dict, List, Any, Set
@@ -39,7 +39,6 @@ ROLE_ID: int | str
 ROLE_ID = int(ROLE_ID_RAW) if ROLE_ID_RAW.isdigit() else ROLE_ID_RAW.lower()
 
 DB_PATH = os.getenv("DB_PATH", "data.db")
-
 BOT_START_TIME = time.time()
 
 # ─────────────────────────────────────────────
@@ -85,7 +84,44 @@ PLATFORM_COLORS: Dict[str, int] = {
 }
 
 # ─────────────────────────────────────────────
-# 🗄️ ASYNC DATA MANAGER (PERSISTENT DB + CACHE)
+# 🧰 UTILITAIRES V3
+# ─────────────────────────────────────────────
+ENRICH_SEM = asyncio.Semaphore(3)
+
+
+def normalize_title(title: str) -> str:
+    title = title.lower()
+    title = re.sub(
+        r"(edition|bundle|collection|game of the year|goty|standard edition|complete edition)",
+        "",
+        title
+    )
+    return re.sub(r"[^a-z0-9]", "", title)
+
+
+async def fetch_json(session: aiohttp.ClientSession, url: str, retries: int = 3):
+    for attempt in range(retries):
+        try:
+            async with session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=15),
+                headers={"User-Agent": "FreeGamesBot/2.0"}
+            ) as r:
+                r.raise_for_status()
+                return await r.json()
+        except Exception as e:
+            log.warning(f"[HTTP] Tentative {attempt+1}/{retries} échouée pour {url}: {e}")
+            if attempt == retries - 1:
+                return None
+            await asyncio.sleep(2 ** attempt)
+
+
+async def safe_enrich(func, game, session):
+    async with ENRICH_SEM:
+        return await func(game, session)
+
+# ─────────────────────────────────────────────
+# 🗄️ DATA MANAGER
 # ─────────────────────────────────────────────
 class DataManager:
     def __init__(self, db_path: str = DB_PATH):
@@ -156,10 +192,8 @@ class DataManager:
         return f"{fr} / {en}"
 
 # ─────────────────────────────────────────────
-# 🌐 ENRICHISSEMENTS STORES (Steam / GOG / Xbox / PSN)
+# 🌐 ENRICHISSEURS STORES
 # ─────────────────────────────────────────────
-import re
-
 STEAM_APPDETAILS_URL = "https://store.steampowered.com/api/appdetails"
 GOG_PRODUCT_URL = "https://api.gog.com/products/{id}?expand=downloads,expanded_dlcs"
 XBOX_PRODUCT_URL = (
@@ -178,6 +212,9 @@ def _extract_steam_appid(url: str) -> str | None:
     if m:
         return m.group(1)
     m = re.search(r"/sub/(\d+)", url)
+    if m:
+        return m.group(1)
+    m = re.search(r"/bundle/(\d+)", url)
     if m:
         return m.group(1)
     return None
@@ -216,13 +253,8 @@ async def enrich_with_steam(game: dict, session: aiohttp.ClientSession) -> dict:
     if not appid:
         return game
 
-    params = {"appids": appid, "l": "english"}
-    try:
-        async with session.get(STEAM_APPDETAILS_URL, params=params, timeout=10) as r:
-            r.raise_for_status()
-            data = await r.json()
-    except Exception as e:
-        log.warning(f"[STEAM] Échec appdetails pour appid={appid}: {e}")
+    data = await fetch_json(session, STEAM_APPDETAILS_URL + f"?appids={appid}&l=english")
+    if not data:
         return game
 
     app_data = data.get(appid, {})
@@ -232,13 +264,10 @@ async def enrich_with_steam(game: dict, session: aiohttp.ClientSession) -> dict:
     details = app_data.get("data", {}) or {}
 
     short_desc = details.get("short_description")
-
     genres_raw = details.get("genres") or []
     genres = [g.get("description") for g in genres_raw if g.get("description")]
-
     categories_raw = details.get("categories") or []
     categories = [c.get("description") for c in categories_raw if c.get("description")]
-
     tags_raw = details.get("tags") or {}
     tags = list(tags_raw.keys())
 
@@ -268,19 +297,13 @@ async def enrich_with_gog(game: dict, session: aiohttp.ClientSession) -> dict:
         return game
 
     api_url = GOG_PRODUCT_URL.format(id=gog_id)
-    try:
-        async with session.get(api_url, timeout=10) as r:
-            r.raise_for_status()
-            data = await r.json()
-    except Exception as e:
-        log.warning(f"[GOG] Échec enrichissement pour id={gog_id}: {e}")
+    data = await fetch_json(session, api_url)
+    if not data:
         return game
 
     short_desc = data.get("shortDescription") or data.get("description")
-
     genres_raw = data.get("genres") or []
     genres = [g.get("name") for g in genres_raw if g.get("name")]
-
     tags_raw = data.get("tags") or []
     tags = [t.get("name") for t in tags_raw if t.get("name")]
 
@@ -302,6 +325,8 @@ async def enrich_with_gog(game: dict, session: aiohttp.ClientSession) -> dict:
         "discount_percent": discount,
         "image": image,
     }
+    if image:
+        game["image"] = image
     return game
 
 
@@ -312,12 +337,8 @@ async def enrich_with_xbox(game: dict, session: aiohttp.ClientSession) -> dict:
         return game
 
     api_url = XBOX_PRODUCT_URL.format(id=xbox_id)
-    try:
-        async with session.get(api_url, timeout=10) as r:
-            r.raise_for_status()
-            data = await r.json()
-    except Exception as e:
-        log.warning(f"[XBOX] Échec enrichissement pour id={xbox_id}: {e}")
+    data = await fetch_json(session, api_url)
+    if not data:
         return game
 
     items = data.get("Products") or []
@@ -325,7 +346,6 @@ async def enrich_with_xbox(game: dict, session: aiohttp.ClientSession) -> dict:
         return game
 
     info = items[0]
-
     desc = info.get("LocalizedProperties", [{}])[0].get("ShortDescription")
 
     images = info.get("Images") or []
@@ -347,7 +367,6 @@ async def enrich_with_xbox(game: dict, session: aiohttp.ClientSession) -> dict:
     base_price = price_info.get("BasePrice")
     final_price = price_info.get("Price")
     discount = price_info.get("DiscountPercentage")
-
     categories = info.get("Properties", {}).get("Categories", [])
 
     game["xbox"] = {
@@ -359,6 +378,8 @@ async def enrich_with_xbox(game: dict, session: aiohttp.ClientSession) -> dict:
         "price_final": final_price,
         "discount_percent": discount,
     }
+    if image:
+        game["image"] = image
     return game
 
 
@@ -369,12 +390,8 @@ async def enrich_with_psn(game: dict, session: aiohttp.ClientSession) -> dict:
         return game
 
     api_url = PSN_PRODUCT_URL.format(id=psn_id)
-    try:
-        async with session.get(api_url, timeout=10) as r:
-            r.raise_for_status()
-            data = await r.json()
-    except Exception as e:
-        log.warning(f"[PSN] Échec enrichissement pour id={psn_id}: {e}")
+    data = await fetch_json(session, api_url)
+    if not data:
         return game
 
     included = data.get("included") or []
@@ -387,7 +404,6 @@ async def enrich_with_psn(game: dict, session: aiohttp.ClientSession) -> dict:
         return game
 
     desc = attributes.get("long-description") or attributes.get("description")
-
     media = attributes.get("media") or {}
     image = None
     if "images" in media:
@@ -407,7 +423,6 @@ async def enrich_with_psn(game: dict, session: aiohttp.ClientSession) -> dict:
     base_price = price_info.get("base-price")
     final_price = price_info.get("actual-price")
     discount = price_info.get("discount-percentage")
-
     categories = attributes.get("genres") or []
 
     game["psn"] = {
@@ -419,6 +434,8 @@ async def enrich_with_psn(game: dict, session: aiohttp.ClientSession) -> dict:
         "price_final": final_price,
         "discount_percent": discount,
     }
+    if image:
+        game["image"] = image
     return game
 
 # ─────────────────────────────────────────────
@@ -428,9 +445,9 @@ async def fetch_epic(session: aiohttp.ClientSession) -> List[Dict[str, Any]]:
     url = "https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions?locale=fr"
     games: List[Dict[str, Any]] = []
     try:
-        async with session.get(url, timeout=15) as r:
-            r.raise_for_status()
-            data = await r.json()
+        data = await fetch_json(session, url)
+        if not data:
+            return games
         elements = (
             data.get("data", {})
             .get("Catalog", {})
@@ -502,9 +519,9 @@ async def fetch_gamerpower(session: aiohttp.ClientSession) -> List[Dict[str, Any
     url = "https://www.gamerpower.com/api/giveaways?type=game"
     games: List[Dict[str, Any]] = []
     try:
-        async with session.get(url, timeout=15) as r:
-            r.raise_for_status()
-            data = await r.json()
+        data = await fetch_json(session, url)
+        if not data:
+            return games
 
         tasks = []
         for item in data:
@@ -519,13 +536,13 @@ async def fetch_gamerpower(session: aiohttp.ClientSession) -> List[Dict[str, Any
             }
 
             if platform == "Steam":
-                tasks.append(enrich_with_steam(game, session))
+                tasks.append(safe_enrich(enrich_with_steam, game, session))
             elif platform == "GOG":
-                tasks.append(enrich_with_gog(game, session))
+                tasks.append(safe_enrich(enrich_with_gog, game, session))
             elif platform == "Xbox":
-                tasks.append(enrich_with_xbox(game, session))
+                tasks.append(safe_enrich(enrich_with_xbox, game, session))
             elif platform == "PlayStation":
-                tasks.append(enrich_with_psn(game, session))
+                tasks.append(safe_enrich(enrich_with_psn, game, session))
             else:
                 tasks.append(asyncio.sleep(0, result=game))
 
@@ -552,7 +569,7 @@ async def fetch_games(session: aiohttp.ClientSession) -> List[Dict[str, Any]]:
         return []
 
 # ─────────────────────────────────────────────
-# 🎁 FUSION MULTI-PLATEFORMES & EMBEDS
+# 🎁 FUSION & EMBEDS
 # ─────────────────────────────────────────────
 def aggregate_games_by_title(raw_games: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     by_title: Dict[str, Dict[str, Any]] = {}
@@ -593,13 +610,18 @@ def aggregate_games_by_title(raw_games: List[Dict[str, Any]]) -> List[Dict[str, 
                 by_title[key]["image"] = image
 
     aggregated: List[Dict[str, Any]] = []
-    for key, data in by_title.items():
+    for _, data in by_title.items():
         aggregated.append(
             {
                 "title": data["title"],
                 "platforms": sorted(list(data["platforms"])),
                 "url": data["url"],
                 "image": data["image"],
+                # on garde la première source enrichie si dispo
+                "steam": next((s.get("steam") for s in data["sources"] if s.get("steam")), None),
+                "gog": next((s.get("gog") for s in data["sources"] if s.get("gog")), None),
+                "xbox": next((s.get("xbox") for s in data["sources"] if s.get("xbox")), None),
+                "psn": next((s.get("psn") for s in data["sources"] if s.get("psn")), None),
             }
         )
     return aggregated
@@ -654,6 +676,27 @@ def build_embed(game: Dict[str, Any], channel_id: int, db: DataManager) -> Optio
         value="🎁 Gratuit",
         inline=True,
     )
+
+    steam = game.get("steam")
+    if steam:
+        if steam.get("price_initial"):
+            price = steam["price_initial"] / 100
+            embed.add_field(
+                name="💸 Prix",
+                value=f"{price:.2f}€ → GRATUIT",
+                inline=True,
+            )
+            if steam.get("price_initial", 0) > 3000:
+                score += 2
+        if steam.get("genres"):
+            embed.add_field(
+                name="🎭 Genres",
+                value=", ".join(steam["genres"][:3]),
+                inline=False,
+            )
+        if steam.get("short_description") and not embed.description:
+            embed.description = steam["short_description"][:200]
+
     embed.add_field(
         name=db.get_text(channel_id, "SCORE"),
         value="⭐" * min(score, 5),
@@ -685,11 +728,6 @@ class UltimateBot(commands.Bot):
 
     async def on_ready(self) -> None:
         log.info(f"🚀 Connecté : {self.user} (ID: {self.user.id})")
-        for guild in self.guilds:
-            log.info(f"🛡️ Guild: {guild.name} (ID: {guild.id})")
-        log.info(f"📡 Salon de scan configuré : {CHANNEL_ID}")
-        log.info(f"📨 Salon de logs : {os.getenv('LOG_CHANNEL_ID') or 'non défini'}")
-
         try:
             synced = await self.tree.sync()
             log.info(f"🔗 {len(synced)} commandes slash synchronisées")
@@ -706,7 +744,7 @@ class UltimateBot(commands.Bot):
 bot = UltimateBot()
 
 # ─────────────────────────────────────────────
-# 🟥 ULTRA‑PRO LOG SYSTEM
+# 🟥 LOGS ULTRA‑PRO
 # ─────────────────────────────────────────────
 LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0"))
 
@@ -759,7 +797,7 @@ async def send_log_embed(
         log.error(f"Erreur lors de l'envoi d'un log embed: {e}", exc_info=True)
 
 # ─────────────────────────────────────────────
-# 🔎 SCAN ENGINE
+# 🔎 SCAN ENGINE V3
 # ─────────────────────────────────────────────
 def _build_mention() -> str:
     if isinstance(ROLE_ID, str) and ROLE_ID == "everyone":
@@ -833,7 +871,8 @@ async def run_scan() -> None:
             if not title:
                 continue
 
-            key = title.lower().strip() + "," + ",".join(g.get("platforms", []))
+            normalized = normalize_title(title)
+            key = normalized + "," + ",".join(g.get("platforms", []))
             game_hash = hashlib.sha256(key.encode()).hexdigest()
 
             if await bot.db.is_reported(game_hash):
@@ -848,15 +887,7 @@ async def run_scan() -> None:
                     content=f"{mention}{bot.db.get_text(channel.id, 'NEW_GAME')}",
                     embed=embed,
                 )
-                try:
-                    await bot.db.mark_as_reported(game_hash)
-                except Exception as e:
-                    log.error(f"Erreur DB lors du marquage du jeu {game_hash}: {e}")
-                    await send_log_embed(
-                        LogLevel.ERROR,
-                        "[DB] Erreur mark_as_reported",
-                        str(e)
-                    )
+                await bot.db.mark_as_reported(game_hash)
                 new_count += 1
 
                 await send_log_embed(
@@ -907,7 +938,7 @@ async def run_scan() -> None:
 @tasks.loop(seconds=CHECK_INTERVAL)
 async def scan_loop() -> None:
     try:
-        await asyncio.wait_for(run_scan(), timeout=45)
+        await asyncio.wait_for(run_scan(), timeout=120)
     except asyncio.TimeoutError:
         log.error("⏳ Scan annulé : timeout global dépassé")
         await send_log_embed(
@@ -1227,11 +1258,7 @@ async def cmd_status(interaction: discord.Interaction) -> None:
     )
 
 # ─────────────────────────────────────────────
-# 🚀 LANCEMENT DU BOT
+# 🚀 LANCEMENT
 # ─────────────────────────────────────────────
-def main():
-    bot.run(BOT_TOKEN)
-
-
 if __name__ == "__main__":
-    main()
+    bot.run(BOT_TOKEN)
