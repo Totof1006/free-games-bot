@@ -28,7 +28,7 @@ logging.basicConfig(
 log = logging.getLogger("FreeGamesBot")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", "1480958930757877791"))
+CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 ROLE_ID_RAW = os.getenv("ROLE_ID", "everyone")
 CHECK_INTERVAL = max(60, int(os.getenv("CHECK_INTERVAL", "3600")))  # seconds
 
